@@ -8,6 +8,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use log::debug;
 use symphonia::core::audio::AudioBuffer;
 use symphonia::core::codecs::{CodecParameters, Decoder as SymphDecoder, DecoderOptions};
 use symphonia::core::errors::Error;
@@ -32,11 +33,13 @@ pub struct SymphoniaDecoder {
     curr_decode_buffer_frame: usize,
 
     num_frames: usize,
-    sample_rate: Option<u32>,
     block_frames: usize,
 
     playhead_frame: usize,
     reset_decode_buffer: bool,
+
+    seek_delta: usize,
+    default_track_id: u32,
 }
 
 impl Decoder for SymphoniaDecoder {
@@ -86,28 +89,27 @@ impl Decoder for SymphoniaDecoder {
             ..Default::default()
         };
 
-        let params = {
-            // Get the default stream.
-            let stream = reader
-                .default_track()
-                .ok_or_else(|| OpenError::NoDefaultTrack)?;
+        let default_track = reader
+            .default_track()
+            .ok_or_else(|| OpenError::NoDefaultTrack)?;
+        let track_id = default_track.id;
+        let params = default_track.codec_params.clone();
 
-            stream.codec_params.clone()
-        };
         let num_frames = params.n_frames.ok_or_else(|| OpenError::NoNumFrames)? as usize;
         let sample_rate = params.sample_rate;
+        let mut seek_delta = 0_usize;
 
         // Seek the reader to the requested position.
         if start_frame != 0 {
-            let seconds = start_frame as f64 / f64::from(sample_rate.unwrap_or(44100));
-
-            reader.seek(
+            let res = reader.seek(
                 SeekMode::Accurate,
-                SeekTo::Time {
-                    time: seconds.into(),
-                    track_id: None,
+                SeekTo::TimeStamp {
+                    ts: start_frame as u64,
+                    track_id,
                 },
             )?;
+            seek_delta = start_frame - res.actual_ts as usize;
+            debug!("Found seek delta of {} for initial seek", seek_delta);
         }
 
         // Create a decoder for the stream.
@@ -138,14 +140,20 @@ impl Decoder for SymphoniaDecoder {
                     }
 
                     let len = decoded.frames();
+                    if seek_delta < len {
+                        let decode_buffer: AudioBuffer<f32> = decoded.make_equivalent();
 
-                    let decode_buffer: AudioBuffer<f32> = decoded.make_equivalent();
-
-                    break (decode_buffer, len);
+                        break (decode_buffer, len);
+                    } else {
+                        // Continue decoding to seek point
+                        seek_delta -= len;
+                    }
                 }
                 Err(Error::DecodeError(err)) => {
                     // Decode errors are not fatal.
                     log::warn!("{err}");
+                    // If we skipped a packet, the seek delta is probably no longer accurate
+                    seek_delta = 0;
                     // Continue by decoding the next packet.
                     continue;
                 }
@@ -176,14 +184,16 @@ impl Decoder for SymphoniaDecoder {
 
                 decode_buffer,
                 decode_buffer_len,
-                curr_decode_buffer_frame: 0,
+                curr_decode_buffer_frame: seek_delta,
 
                 num_frames,
-                sample_rate,
                 block_frames,
 
                 playhead_frame: start_frame,
                 reset_decode_buffer: false,
+
+                seek_delta: 0,
+                default_track_id: track_id,
             },
             file_info,
         ))
@@ -199,16 +209,20 @@ impl Decoder for SymphoniaDecoder {
 
         self.playhead_frame = frame;
 
-        let seconds = self.playhead_frame as f64 / f64::from(self.sample_rate.unwrap_or(44100));
-
         match self.reader.seek(
             SeekMode::Accurate,
-            SeekTo::Time {
-                time: seconds.into(),
-                track_id: None,
+            SeekTo::TimeStamp {
+                ts: frame as u64,
+                track_id: self.default_track_id,
             },
         ) {
-            Ok(_res) => {}
+            Ok(res) => {
+                self.seek_delta = frame - res.actual_ts as usize;
+                self.decoder.reset();
+                if self.seek_delta > 0 {
+                    debug!("Found seek delta of {}", frame - res.actual_ts as usize);
+                }
+            }
             Err(e) => {
                 return Err(e);
             }
@@ -280,10 +294,25 @@ impl Decoder for SymphoniaDecoder {
                         Ok(packet) => {
                             match self.decoder.decode(&packet) {
                                 Ok(decoded) => {
-                                    self.decode_buffer_len = decoded.frames();
-                                    decoded.convert(&mut self.decode_buffer);
+                                    let seek_delta = self.seek_delta;
+                                    let decoded_frames = decoded.frames();
+                                    if seek_delta < decoded_frames {
+                                        self.seek_delta = 0;
+                                        self.decode_buffer_len = decoded_frames;
+                                        decoded.convert(&mut self.decode_buffer);
 
-                                    self.curr_decode_buffer_frame = 0;
+                                        self.curr_decode_buffer_frame = seek_delta;
+                                        if seek_delta > 0 {
+                                            debug!("Recovered seek delta of {seek_delta}");
+                                        }
+                                    } else {
+                                        // Continue until we decode back to the desired seek point
+                                        self.seek_delta -= decoded_frames;
+                                        debug!(
+                                            "Skipped {} decoded frames, seek delta is now {}",
+                                            decoded_frames, self.seek_delta
+                                        );
+                                    }
                                     break;
                                 }
                                 Err(Error::DecodeError(err)) => {
