@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use log::debug;
-use symphonia::core::audio::AudioBuffer;
+use symphonia::core::audio::{AudioBuffer, Signal};
 use symphonia::core::codecs::{CodecParameters, Decoder as SymphDecoder, DecoderOptions};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
@@ -29,7 +29,6 @@ pub struct SymphoniaDecoder {
     decoder: Box<dyn SymphDecoder>,
 
     decode_buffer: AudioBuffer<f32>,
-    decode_buffer_len: usize,
     curr_decode_buffer_frame: usize,
 
     num_frames: usize,
@@ -124,7 +123,7 @@ impl Decoder for SymphoniaDecoder {
         let mut channels = params.channels;
 
         // Decode the first packet to get the signal specification.
-        let (decode_buffer, decode_buffer_len) = loop {
+        let decode_buffer = loop {
             match decoder.decode(&reader.next_packet()?) {
                 Ok(decoded) => {
                     // Get the buffer spec.
@@ -141,9 +140,9 @@ impl Decoder for SymphoniaDecoder {
 
                     let len = decoded.frames();
                     if seek_delta < len {
-                        let decode_buffer: AudioBuffer<f32> = decoded.make_equivalent();
-
-                        break (decode_buffer, len);
+                        let mut decode_buffer: AudioBuffer<f32> = decoded.make_equivalent();
+                        decode_buffer.shift(seek_delta);
+                        break decode_buffer;
                     } else {
                         // Continue decoding to seek point
                         seek_delta -= len;
@@ -183,8 +182,7 @@ impl Decoder for SymphoniaDecoder {
                 decoder,
 
                 decode_buffer,
-                decode_buffer_len,
-                curr_decode_buffer_frame: seek_delta,
+                curr_decode_buffer_frame: 0,
 
                 num_frames,
                 block_frames,
@@ -265,7 +263,7 @@ impl Decoder for SymphoniaDecoder {
             } else {
                 // Find the maximum amount of frames that can be copied.
                 (self.block_frames - block_start_frame)
-                    .min(self.decode_buffer_len - self.curr_decode_buffer_frame)
+                    .min(self.decode_buffer.frames() - self.curr_decode_buffer_frame)
             };
 
             if num_frames_to_cpy != 0 {
@@ -282,7 +280,7 @@ impl Decoder for SymphoniaDecoder {
                 block_start_frame += num_frames_to_cpy;
 
                 self.curr_decode_buffer_frame += num_frames_to_cpy;
-                if self.curr_decode_buffer_frame >= self.decode_buffer_len {
+                if self.curr_decode_buffer_frame >= self.decode_buffer.frames() {
                     self.reset_decode_buffer = true;
                 }
             } else {
@@ -297,10 +295,10 @@ impl Decoder for SymphoniaDecoder {
                                     let decoded_frames = decoded.frames();
                                     if seek_delta < decoded_frames {
                                         self.seek_delta = 0;
-                                        self.decode_buffer_len = decoded_frames;
                                         decoded.convert(&mut self.decode_buffer);
+                                        self.decode_buffer.shift(seek_delta);
+                                        self.curr_decode_buffer_frame = 0;
 
-                                        self.curr_decode_buffer_frame = seek_delta;
                                         if seek_delta > 0 {
                                             debug!("Recovered seek delta of {seek_delta}");
                                         }
