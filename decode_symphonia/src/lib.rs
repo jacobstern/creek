@@ -218,7 +218,6 @@ impl Decoder for SymphoniaDecoder {
         ) {
             Ok(res) => {
                 self.seek_delta = frame - res.actual_ts as usize;
-                self.decoder.reset();
                 if self.seek_delta > 0 {
                     debug!("Found seek delta of {}", frame - res.actual_ts as usize);
                 }
