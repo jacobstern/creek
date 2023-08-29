@@ -253,7 +253,7 @@ impl Decoder for SymphoniaDecoder {
         let mut reached_end_of_file = false;
 
         let mut block_start = 0;
-        while block_start < self.block_size {
+        while block_start < self.block_size && !reached_end_of_file {
             let num_frames_to_cpy = if self.reset_smp_buffer {
                 // Get new data first.
                 self.reset_smp_buffer = false;
@@ -342,7 +342,6 @@ impl Decoder for SymphoniaDecoder {
                                 if io_error.kind() == std::io::ErrorKind::UnexpectedEof {
                                     // End of file, stop decoding.
                                     reached_end_of_file = true;
-                                    block_start = self.block_size;
                                     break;
                                 } else {
                                     return Err(e);
@@ -355,6 +354,8 @@ impl Decoder for SymphoniaDecoder {
                 }
             }
         }
+
+        data_block.num_frames = block_start;
 
         if reached_end_of_file {
             self.current_frame = self.num_frames;

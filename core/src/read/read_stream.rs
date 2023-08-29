@@ -799,6 +799,14 @@ impl<D: Decoder> ReadDiskStream<D> {
                             [self.current_frame_in_block..self.current_frame_in_block + first_len];
 
                         read_buffer_part.copy_from_slice(from_buffer_part);
+
+                        let available_frames =
+                            block.num_frames - self.current_frame_in_block.min(block.num_frames);
+                        if available_frames < first_len {
+                            // Replace garbage data
+                            read_buffer_part[available_frames..first_len]
+                                .fill_with(Default::default);
+                        }
                     } else {
                         // Output silence.
                         read_buffer_part[..first_len].fill_with(Default::default);
@@ -848,6 +856,11 @@ impl<D: Decoder> ReadDiskStream<D> {
                         let from_buffer_part = &block.block[i][0..second_len];
 
                         read_buffer_part.copy_from_slice(from_buffer_part);
+                        if block.num_frames < second_len {
+                            // Replace garbage data
+                            read_buffer_part[block.num_frames..second_len]
+                                .fill_with(Default::default);
+                        }
                     } else {
                         // Output silence.
                         read_buffer_part[..second_len].fill_with(Default::default);
@@ -894,6 +907,13 @@ impl<D: Decoder> ReadDiskStream<D> {
                             [self.current_frame_in_block..self.current_frame_in_block + frames];
 
                         read_buffer_part.copy_from_slice(from_buffer_part);
+
+                        let available_frames =
+                            block.num_frames - self.current_frame_in_block.min(block.num_frames);
+                        if available_frames < frames {
+                            // Replace garbage data
+                            read_buffer_part[available_frames..frames].fill_with(Default::default);
+                        }
                     } else {
                         // Output silence.
                         read_buffer_part[..frames].fill_with(Default::default);

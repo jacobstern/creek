@@ -1,6 +1,7 @@
 /// A prefetch data block.
 pub struct DataBlock<T: Copy + Clone + Default + Send> {
     pub block: Vec<Vec<T>>,
+    pub num_frames: usize,
 }
 
 impl<T: Copy + Clone + Default + Send> DataBlock<T> {
@@ -19,7 +20,10 @@ impl<T: Copy + Clone + Default + Send> DataBlock<T> {
             block.push(data);
         }
 
-        DataBlock { block }
+        DataBlock {
+            block,
+            num_frames: 0,
+        }
     }
 }
 
